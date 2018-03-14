@@ -3,32 +3,44 @@ package fr.sellsy.cordova;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CallbackContext;
 
-
 import java.io.UnsupportedEncodingException;
 import java.util.Locale;
 import java.util.ArrayList;
 import java.util.List;
-
 
 import com.starmicronics.stario.PortInfo;
 import com.starmicronics.stario.StarIOPort;
 import com.starmicronics.stario.StarIOPortException;
 import com.starmicronics.stario.StarPrinterStatus;
 
+import com.starmicronics.starioextension.ICommandBuilder;
+import com.starmicronics.starioextension.StarIoExt;
+
+import static com.starmicronics.starioextension.StarIoExt.Emulation;
+import static com.starmicronics.starioextension.ICommandBuilder.CutPaperAction;
+
 import org.apache.cordova.PluginResult;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Rect;
+import android.graphics.Typeface;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
+
 import android.content.Context;
 import android.util.Log;
-
 
 /**
  * This class echoes a string called from JavaScript.
  */
 public class StarIOPlugin extends CordovaPlugin {
-
 
     private CallbackContext _callbackContext = null;
     String strInterface;
@@ -52,13 +64,13 @@ public class StarIOPlugin extends CordovaPlugin {
         }else {
             String portName = args.getString(0);
             String portSettings = getPortSettingsOption(portName);
-            String receipt = args.getString(1);
+            int model = args.getInt(1);
+            String receipt = args.getString(2);
 
-            this.printReceipt(portName, portSettings, receipt, callbackContext);
+            this.printReceipt(portName, model, portSettings, receipt, callbackContext);
             return true;
         }
     }
-
 
     public void checkStatus(String portName, String portSettings, CallbackContext callbackContext) {
 
@@ -118,7 +130,6 @@ public class StarIOPlugin extends CordovaPlugin {
                 });
     }
 
-
     private void portDiscovery(String strInterface, CallbackContext callbackContext) {
 
         JSONArray result = new JSONArray();
@@ -145,7 +156,6 @@ public class StarIOPlugin extends CordovaPlugin {
             callbackContext.success(result);
         }
     }
-
 
     private JSONArray getPortDiscovery(String interfaceName) throws StarIOPortException, JSONException {
         List<PortInfo> BTPortList;
@@ -208,9 +218,6 @@ public class StarIOPlugin extends CordovaPlugin {
         return arrayPorts;
     }
 
-
-
-
     private String getPortSettingsOption(String portName) {
         String portSettings = "";
 
@@ -224,22 +231,28 @@ public class StarIOPlugin extends CordovaPlugin {
         return portSettings;
     }
 
-
-    private boolean printReceipt(String portName, String portSettings, String receipt, CallbackContext callbackContext) throws JSONException {
+    private boolean printReceipt(String portName, int model, String portSettings, String receipt, CallbackContext callbackContext) throws JSONException {
 
         Context context = this.cordova.getActivity();
+        Emulation emulation = ModelCapability.getEmulation(model);
+        boolean canPrintTextReceipt = emulation != Emulation.StarGraphic;
+        byte[] commandToSendToPrinter = null;
 
+        if (canPrintTextReceipt) {
+            ArrayList<byte[]> list = new ArrayList<byte[]>();
+            list.add(new byte[] { 0x1b, 0x1d, 0x74, (byte)0x80 });
+            list.add(createCpUTF8(receipt));
+            list.add(new byte[] { 0x1b, 0x64, 0x02 }); // Cut
+            list.add(new byte[]{0x07}); // Kick cash drawer
+            commandToSendToPrinter = convertFromListByteArrayTobyteArray(list);
+        } else {
+            commandToSendToPrinter = createRasterReceiptData(emulation, receipt);
+        }
 
-        ArrayList<byte[]> list = new ArrayList<byte[]>();
-        list.add(new byte[] { 0x1b, 0x1d, 0x74, (byte)0x80 });
-        list.add(createCpUTF8(receipt));
-        list.add(new byte[] { 0x1b, 0x64, 0x02 }); // Cut
-        list.add(new byte[]{0x07}); // Kick cash drawer
-
-        return sendCommand(context, portName, portSettings, list, callbackContext);
+        return sendCommand(context, portName, portSettings, commandToSendToPrinter, callbackContext);
     }
 
-    private boolean sendCommand(Context context, String portName, String portSettings, ArrayList<byte[]> byteList, CallbackContext callbackContext) {
+    private boolean sendCommand(Context context, String portName, String portSettings, byte[] commandToSendToPrinter, CallbackContext callbackContext) {
         StarIOPort port = null;
         try {
 			/*
@@ -269,7 +282,6 @@ public class StarIOPlugin extends CordovaPlugin {
                 return false;
             }
 
-            byte[] commandToSendToPrinter = convertFromListByteArrayTobyteArray(byteList);
             port.writePort(commandToSendToPrinter, 0, commandToSendToPrinter.length);
 
             port.setEndCheckedBlockTimeoutMillis(30000);// Change the timeout time of endCheckedBlock method.
@@ -304,7 +316,6 @@ public class StarIOPlugin extends CordovaPlugin {
         }
     }
 
-
     private byte[] createCpUTF8(String inputText) {
         byte[] byteBuffer = null;
 
@@ -317,6 +328,49 @@ public class StarIOPlugin extends CordovaPlugin {
         return byteBuffer;
     }
 
+    public static byte[] createRasterReceiptData(Emulation emulation, String receipt) {
+        ICommandBuilder builder = StarIoExt.createCommandBuilder(emulation);
+
+        builder.beginDocument();
+
+        int textSize = 25;
+        int paperSizeThreeInch = 576;
+        Typeface typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL);
+        Bitmap image = createBitmapFromText(receipt, textSize, paperSizeThreeInch, typeface);
+
+        builder.appendBitmap(image, false);
+
+        builder.appendCutPaper(CutPaperAction.PartialCutWithFeed);
+
+        builder.endDocument();
+
+        return builder.getCommands();
+    }
+
+    static public Bitmap createBitmapFromText(String printText, int textSize, int printWidth, Typeface typeface) {
+        Paint paint = new Paint();
+        Bitmap bitmap;
+        Canvas canvas;
+
+        paint.setTextSize(textSize);
+        paint.setTypeface(typeface);
+
+        paint.getTextBounds(printText, 0, printText.length(), new Rect());
+
+        TextPaint textPaint = new TextPaint(paint);
+        android.text.StaticLayout staticLayout = new StaticLayout(printText, textPaint, printWidth, Layout.Alignment.ALIGN_NORMAL, 1, 0, false);
+
+        // Create bitmap
+        bitmap = Bitmap.createBitmap(staticLayout.getWidth(), staticLayout.getHeight(), Bitmap.Config.ARGB_8888);
+
+        // Create canvas
+        canvas = new Canvas(bitmap);
+        canvas.drawColor(Color.WHITE);
+        canvas.translate(0, 0);
+        staticLayout.draw(canvas);
+
+        return bitmap;
+    }
 
     private byte[] convertFromListByteArrayTobyteArray(List<byte[]> ByteArray) {
         int dataLength = 0;

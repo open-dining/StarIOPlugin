@@ -18,13 +18,13 @@ module.exports = {
                 callback(error)
             }, 'StarIOPlugin', 'portDiscovery', [type]);
     },
-    printReceipt: function (port, receipt, callback) {
+    printReceipt: function (port, model, receipt, callback) {
         exec(function (result) {
                 callback(null, result)
             },
             function (error) {
                 callback(error)
-            }, 'StarIOPlugin', 'printReceipt', [port, receipt]);
+            }, 'StarIOPlugin', 'printReceipt', [port, model, receipt]);
     },
     openCashDrawer: function (port, callback) {
         exec(function (result) {
